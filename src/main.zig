@@ -1,15 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator;
 
-var arena: Allocator = undefined;
+var gpa = GeneralPurposeAllocator(.{}){};
+var arena: ArenaAllocator = undefined;
 
 pub fn main() anyerror!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var aa = std.heap.ArenaAllocator.init(gpa.allocator());
-    arena = aa.allocator();
-    // Note that info level log messages are by default printed only in Debug
-    // and ReleaseSafe build modes.
-    std.log.info("All your codebase are belong to us.", .{});
+    arena = ArenaAllocator.init(gpa.allocator());
 }
 
 pub fn log(
@@ -410,6 +408,10 @@ const Parser = struct {
 };
 
 export fn parse(str: [*:0]const u8) ?*const Expr {
-    var parser = Parser.init(arena, str);
+    var parser = Parser.init(arena.allocator(), str);
     return parser.parse();
+}
+
+export fn allocateBytes(len: usize) *anyopaque {
+    return (gpa.allocator().alloc(u8, len) catch std.process.exit(1)).ptr;
 }
