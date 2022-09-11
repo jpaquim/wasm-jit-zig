@@ -3,11 +3,11 @@
 Build with:
 
 ```sh
-zig build -Dtarget=wasm32-freestanding
+zig build-lib -dynamic -target wasm32-freestanding src/main.zig --name interplib && cp interplib.wasm public/
 ```
 
 For production:
 
 ```sh
-zig build -Dtarget=wasm32-freestanding -Drelease-small
+zig build-lib -O ReleaseSmall -dynamic -target wasm32-freestanding src/main.zig --name interplib && cp interplib.wasm public/
 ```

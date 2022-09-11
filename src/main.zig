@@ -13,10 +13,6 @@ fn logString(string: []const u8) void {
     consoleLogString(string.ptr, string.len);
 }
 
-pub fn main() anyerror!void {
-    arena = ArenaAllocator.init(gpa.allocator());
-}
-
 pub fn log(
     comptime message_level: std.log.Level,
     comptime scope: @Type(.EnumLiteral),
@@ -71,7 +67,7 @@ const Func = struct {
     const arg_count: u32 = 1;
 
     expr: Expr, // base class
-    body: *const Expr, // unique_ptr
+    body: *Expr, // unique_ptr
     jit_code: ?*anyopaque, // void *
 
     fn offsetOfBody() usize {
@@ -82,12 +78,18 @@ const Func = struct {
         return @offsetOf(Func, "jit_code");
     }
 
-    fn init(body: *const Expr) Func {
+    fn init(body: *Expr) Func {
         return .{
             .expr = Expr.init(Expr.Kind.Func),
             .body = body,
             .jit_code = null,
         };
+    }
+
+    fn initAlloc(body: *Expr) *Func {
+        var self = gpa.allocator().create(Func) catch std.process.exit(1);
+        self.* = init(body);
+        return self;
     }
 };
 
@@ -95,15 +97,21 @@ const LetRec = struct {
     const arg_count: u32 = 1;
 
     expr: Expr, // base class
-    arg: *const Expr, // unique_ptr
-    body: *const Expr, // unique_ptr
+    arg: *Expr, // unique_ptr
+    body: *Expr, // unique_ptr
 
-    fn init(arg: *const Expr, body: *const Expr) LetRec {
+    fn init(arg: *Expr, body: *Expr) LetRec {
         return .{
             .expr = Expr.init(Expr.Kind.LetRec),
             .arg = arg,
             .body = body,
         };
+    }
+
+    fn initAlloc(arg: *Expr, body: *Expr) *LetRec {
+        var self = gpa.allocator().create(LetRec) catch std.process.exit(1);
+        self.* = init(arg, body);
+        return self;
     }
 };
 
@@ -116,6 +124,12 @@ const Var = struct {
             .expr = Expr.init(Expr.Kind.Var),
             .depth = depth,
         };
+    }
+
+    fn initAlloc(depth: u32) *Var {
+        var self = gpa.allocator().create(Var) catch std.process.exit(1);
+        self.* = init(depth);
+        return self;
     }
 };
 
@@ -130,16 +144,22 @@ const Prim = struct {
 
     expr: Expr, // base class
     op: Op,
-    lhs: *const Expr, // unique_ptr
-    rhs: *const Expr, // unique_ptr
+    lhs: *Expr, // unique_ptr
+    rhs: *Expr, // unique_ptr
 
-    fn init(op: Op, lhs: *const Expr, rhs: *const Expr) Prim {
+    fn init(op: Op, lhs: *Expr, rhs: *Expr) Prim {
         return .{
             .expr = Expr.init(Expr.Kind.Prim),
             .op = op,
             .lhs = lhs,
             .rhs = rhs,
         };
+    }
+
+    fn initAlloc(op: Op, lhs: *Expr, rhs: *Expr) *Prim {
+        var self = gpa.allocator().create(Prim) catch std.process.exit(1);
+        self.* = init(op, lhs, rhs);
+        return self;
     }
 };
 
@@ -153,35 +173,53 @@ const Literal = struct {
             .val = val,
         };
     }
+
+    fn initAlloc(val: i32) *Literal {
+        var self = gpa.allocator().create(Literal) catch std.process.exit(1);
+        self.* = init(val);
+        return self;
+    }
 };
 
 const Call = struct {
     expr: Expr, // base class
-    func: *const Expr, // unique_ptr
-    arg: *const Expr, // unique_ptr
+    func: *Expr, // unique_ptr
+    arg: *Expr, // unique_ptr
 
-    fn init(func: *const Expr, arg: *const Expr) Call {
+    fn init(func: *Expr, arg: *Expr) Call {
         return .{
             .expr = Expr.init(Expr.Kind.Call),
             .func = func,
             .arg = arg,
         };
     }
+
+    fn initAlloc(func: *Expr, arg: *Expr) *Call {
+        var self = gpa.allocator().create(Call) catch std.process.exit(1);
+        self.* = init(func, arg);
+        return self;
+    }
 };
 
 const If = struct {
     expr: Expr, // base class
-    test_: *const Expr, // unique_ptr
-    consequent: *const Expr, // unique_ptr
-    alternate: *const Expr, // unique_ptr
+    test_: *Expr, // unique_ptr
+    consequent: *Expr, // unique_ptr
+    alternate: *Expr, // unique_ptr
 
-    fn init(test_: *const Expr, consequent: *const Expr, alternate: *const Expr) If {
+    fn init(test_: *Expr, consequent: *Expr, alternate: *Expr) If {
         return .{
             .expr = Expr.init(Expr.Kind.If),
             .test_ = test_,
             .consequent = consequent,
             .alternate = alternate,
         };
+    }
+
+    fn initAlloc(test_: *Expr, consequent: *Expr, alternate: *Expr) *If {
+        var self = gpa.allocator().create(If) catch std.process.exit(1);
+        self.* = init(test_, consequent, alternate);
+        return self;
     }
 };
 
@@ -216,7 +254,7 @@ const Parser = struct {
         };
     }
 
-    fn parse(self: *Parser) ?*const Expr {
+    fn parse(self: *Parser) *const Expr {
         const e = self.parseOne();
         self.skipWhitespace();
         if (!self.eof())
@@ -324,10 +362,10 @@ const Parser = struct {
         // return 1;
     }
 
-    fn parsePrim(self: *Parser, op: Prim.Op) *const Expr {
+    fn parsePrim(self: *Parser, op: Prim.Op) *Expr {
         const lhs = self.parseOne();
         const rhs = self.parseOne();
-        return &Prim.init(op, lhs.?, rhs.?).expr;
+        return &Prim.initAlloc(op, lhs, rhs).expr;
     }
 
     fn parseInt32(self: *Parser) i32 {
@@ -343,14 +381,14 @@ const Parser = struct {
         return @intCast(i32, ret);
     }
 
-    fn parseOne(self: *Parser) ?*const Expr {
+    fn parseOne(self: *Parser) *Expr {
         self.skipWhitespace();
         if (self.eof())
             self.err("unexpected end of input");
         if (self.matchChar('(')) {
             self.skipWhitespace();
 
-            var ret: *const Expr = undefined;
+            var ret: *Expr = undefined;
             if (self.matchKeyword("lambda")) {
                 self.skipWhitespace();
                 if (!self.matchChar('('))
@@ -364,7 +402,7 @@ const Parser = struct {
                     self.err("expected just one argument for lambda");
                 const body = self.parseOne();
                 self.popBound();
-                ret = &Func.init(body.?).expr;
+                ret = &Func.initAlloc(body).expr;
             } else if (self.matchKeyword("letrec")) {
                 self.skipWhitespace();
                 if (!self.matchChar('('))
@@ -384,7 +422,7 @@ const Parser = struct {
                     self.err("expected just one binding for letrec");
                 const body = self.parseOne();
                 self.popBound();
-                ret = &LetRec.init(arg.?, body.?).expr;
+                ret = &LetRec.initAlloc(arg, body).expr;
             } else if (self.matchKeyword("+")) {
                 ret = self.parsePrim(Prim.Op.Add);
             } else if (self.matchKeyword("-")) {
@@ -399,32 +437,31 @@ const Parser = struct {
                 const test_ = self.parseOne();
                 const consequent = self.parseOne();
                 const alternate = self.parseOne();
-                ret = &If.init(test_.?, consequent.?, alternate.?).expr;
+                ret = &If.initAlloc(test_, consequent, alternate).expr;
             } else {
                 // Otherwise it's a call.
                 const func = self.parseOne();
                 const arg = self.parseOne();
-                ret = &Call.init(func.?, arg.?).expr;
+                ret = &Call.initAlloc(func, arg).expr;
             }
             self.skipWhitespace();
             if (!self.matchChar(')'))
                 self.err("expected close parenthesis");
             return ret;
         } else if (self.startsIdentifier()) {
-            return &Var.init(self.lookupBound(self.takeIdentifier())).expr;
+            return &Var.initAlloc(self.lookupBound(self.takeIdentifier())).expr;
         } else if (isNumeric(self.peek())) {
-            return &Literal.init(self.parseInt32()).expr;
+            return &Literal.initAlloc(self.parseInt32()).expr;
         }
         self.err("unexpected input");
-        return null;
     }
 };
 
-export fn parse(str: [*:0]const u8) ?*const Expr {
+export fn parse(str: [*:0]const u8) *const Expr {
     std.log.info("parser input: {s}", .{str});
     var parser = Parser.init(arena.allocator(), str);
     const result = parser.parse();
-    std.log.info("parser output: {}", .{result.?});
+    std.log.info("parser output: {}", .{result});
     return result;
 }
 
@@ -821,11 +858,11 @@ fn evalPrimcall(op: Prim.Op, lhs: isize, rhs: isize) Value {
 }
 
 // var jit_candidates: std.AutoHashMap(*Func, void);
-var jit_candidates = std.AutoHashMap(*const Func, void).init(gpa.allocator());
+var jit_candidates = std.AutoHashMap(*Func, void).init(gpa.allocator());
 
 const JitFunction = fn (*Env, *Heap) Value;
 
-fn eval_(expr_arg: *const Expr, unrooted_env: ?*Env, heap: *Heap) Value {
+fn eval_(expr_arg: *Expr, unrooted_env: ?*Env, heap: *Heap) Value {
     var env = Rooted(Env).init(heap, unrooted_env);
     var expr = expr_arg;
 
@@ -907,6 +944,620 @@ export fn eval(expr: *Expr, heap_size: usize) void {
     var heap = Heap.init(heap_size);
     const res = eval_(expr, null, &heap);
     std.log.info("result: {}", .{res.getSmi()});
+}
+
+const WasmSimpleBlockType = enum(u8) {
+    Void = 0x40, // SLEB128(-0x40)
+};
+
+const WasmValType = enum(u8) {
+    I32 = 0x7f, // SLEB128(-0x01)
+    I64 = 0x7e, // SLEB128(-0x02)
+    F32 = 0x7d, // SLEB128(-0x03)
+    F64 = 0x7c, // SLEB128(-0x04)
+    FuncRef = 0x70, // SLEB128(-0x10)
+};
+
+const WasmResultType = std.ArrayList(WasmValType);
+
+const WasmFuncType = struct {
+    params: WasmResultType,
+    results: WasmResultType,
+};
+
+const WasmFunc = struct {
+    type_idx: usize,
+    locals: std.ArrayList(WasmValType),
+    code: std.ArrayList(u8),
+};
+
+const WasmWriter = struct {
+    code: std.ArrayList(u8) = std.ArrayList(u8).init(gpa.allocator()),
+
+    fn finish(self: WasmWriter) std.ArrayList(u8) {
+        return self.code;
+    }
+
+    fn emit(self: *WasmWriter, byte: u8) void {
+        self.code.append(byte) catch std.process.exit(1);
+    }
+
+    fn emitVarU32(self: *WasmWriter, i_: u32) void {
+        var i = i_;
+        while (true) {
+            var byte = @intCast(u8, i & 0x7f);
+            i >>= 7;
+            if (i != 0)
+                byte |= 0x80;
+            self.emit(byte);
+            if (i == 0) break;
+        }
+    }
+
+    fn emitVarI32(self: *WasmWriter, i_: i32) void {
+        var i = i_;
+        var done: bool = undefined;
+        while (true) {
+            var byte = i & 0x7f;
+            i >> 7;
+            done = ((i == 0) and !(byte & 0x40)) or ((i == -1) and (byte & 0x40));
+            if (!done)
+                byte |= 0x80;
+            self.emit(byte);
+            if (done) break;
+        }
+    }
+
+    fn emitPatchableVarU32(self: *WasmWriter) usize {
+        const offset = self.code.items.len;
+        self.emitVarU32(std.math.maxInt(u32));
+        return offset;
+    }
+
+    fn emitPatchableVarI32(self: *WasmWriter) usize {
+        const offset = self.code.items.len;
+        self.emitVarI32(std.math.maxInt(i32));
+        return offset;
+    }
+
+    fn patchVarI32(self: *WasmWriter, offset: usize, val_: i32) void {
+        var val = val_;
+        var i: usize = 0;
+        while (i < 5) : ({
+            i += 1;
+            val >>= 7;
+        }) {
+            var byte = val & 0x7f;
+            if (i < 4)
+                byte |= 0x80;
+            self.code.items[offset + i] = byte;
+        }
+    }
+
+    fn patchVarU32(self: *WasmWriter, offset: usize, val_: u32) void {
+        var val = val_;
+        var i: usize = 0;
+        while (i < 5) : ({
+            i += 1;
+            val >>= 7;
+        }) {
+            var byte = @intCast(u8, val & 0x7f);
+            if (i < 4)
+                byte |= 0x80;
+            self.code.items[offset + i] = byte;
+        }
+    }
+
+    fn emitValType(self: *WasmWriter, t: WasmValType) void {
+        self.emit(@enumToInt(t));
+    }
+};
+
+const WasmAssembler = struct {
+    writer: WasmWriter = WasmWriter{},
+
+    const Op = enum(u8) {
+        Unreachable = 0x00,
+        Nop = 0x01,
+        Block = 0x02,
+        Loop = 0x03,
+        If = 0x04,
+        Else = 0x05,
+        End = 0x0b,
+        Br = 0x0c,
+        BrIf = 0x0d,
+        Return = 0x0f,
+
+        // Call operators
+        Call = 0x10,
+        CallIndirect = 0x11,
+
+        // Parametric operators
+        Drop = 0x1a,
+
+        // Variable access
+        LocalGet = 0x20,
+        LocalSet = 0x21,
+        LocalTee = 0x22,
+
+        // Memory-related operators
+        I32Load = 0x28,
+        I32Store = 0x36,
+
+        // Constants
+        I32Const = 0x41,
+
+        // Comparison operators
+        I32Eqz = 0x45,
+        I32Eq = 0x46,
+        I32Ne = 0x47,
+        I32LtS = 0x48,
+        I32LtU = 0x49,
+
+        // Numeric operators
+        I32Add = 0x6a,
+        I32Sub = 0x6b,
+        I32Mul = 0x6c,
+        I32And = 0x71,
+        I32Or = 0x72,
+        I32Xor = 0x73,
+        I32Shl = 0x74,
+        I32ShrS = 0x75,
+        I32ShrU = 0x76,
+
+        RefNull = 0xd0,
+
+        MiscPrefix = 0xfc,
+    };
+
+    const MiscOp = enum(u8) {
+        TableGrow = 0x0f,
+        TableInit = 0x0c,
+    };
+
+    fn emitOp(self: WasmAssembler, op: Op) void {
+        self.emit(@enumToInt(op));
+    }
+
+    fn emitPatchableI32Const(self: WasmAssembler) void {
+        self.emitOp(.I32Const);
+        return self.writer.emitPatchableVarI32();
+    }
+
+    fn emitI32Const(self: WasmAssembler, val: i32) void {
+        self.emitOp(.I32Const);
+        return self.emitVarI32(val);
+    }
+
+    fn emitMemArg(self: WasmAssembler, align_: i32, offset: u32) void {
+        self.writer.emitVarU32(align_);
+        self.writer.emitVarU32(offset);
+    }
+
+    const Int32SizeLog2 = 2;
+
+    fn emitI32Load(self: WasmAssembler, offset: ?u32) void {
+        self.emitOp(.I32Load);
+        self.emitMemArg(Int32SizeLog2, offset orelse 0);
+    }
+
+    fn emitI32Store(self: WasmAssembler, offset: ?u32) void {
+        self.emitOp(.I32Store);
+        self.emitMemArg(Int32SizeLog2, offset orelse 0);
+    }
+
+    fn emitLocalGet(self: WasmAssembler, idx: u32) void {
+        self.emitOp(.LocalGet);
+        self.emitVarU32(idx);
+    }
+
+    fn emitLocalSet(self: WasmAssembler, idx: u32) void {
+        self.emitOp(.LocalSet);
+        self.emitVarU32(idx);
+    }
+
+    fn emitLocalTee(self: WasmAssembler, idx: u32) void {
+        self.emitOp(.LocalTee);
+        self.emitVarU32(idx);
+    }
+
+    fn emitI32Eqz(self: WasmAssembler) void {
+        self.emitOp(.I32Eqz);
+    }
+
+    fn emitI32Eq(self: WasmAssembler) void {
+        self.emitOp(.I32Eq);
+    }
+
+    fn emitI32Ne(self: WasmAssembler) void {
+        self.emitOp(.I32Ne);
+    }
+
+    fn emitI32LtS(self: WasmAssembler) void {
+        self.emitOp(.I32LtS);
+    }
+
+    fn emitI32LtU(self: WasmAssembler) void {
+        self.emitOp(.I32LtU);
+    }
+
+    fn emitI32Add(self: WasmAssembler) void {
+        self.emitOp(.I32Add);
+    }
+
+    fn emitI32Sub(self: WasmAssembler) void {
+        self.emitOp(.I32Sub);
+    }
+
+    fn emitI32Mul(self: WasmAssembler) void {
+        self.emitOp(.I32Mul);
+    }
+
+    fn emitI32And(self: WasmAssembler) void {
+        self.emitOp(.I32And);
+    }
+
+    fn emitI32Or(self: WasmAssembler) void {
+        self.emitOp(.I32Or);
+    }
+
+    fn emitI32Xor(self: WasmAssembler) void {
+        self.emitOp(.I32Xor);
+    }
+
+    fn emitI32Shl(self: WasmAssembler) void {
+        self.emitOp(.I32Shl);
+    }
+
+    fn emitI32ShrS(self: WasmAssembler) void {
+        self.emitOp(.I32ShrS);
+    }
+
+    fn emitI32ShrU(self: WasmAssembler) void {
+        self.emitOp(.I32ShrU);
+    }
+
+    fn emitCallIndirect(self: WasmAssembler, callee_type: u32, table: ?u32) void {
+        self.emitOp(.CallIndirect);
+        self.emitVarU32(callee_type);
+        self.emitVarU32(table orelse 0);
+    }
+
+    fn emitRefNull(self: WasmAssembler, type_: WasmValType) void {
+        self.emitOp(.RefNull);
+        self.writer.emitValType(type_);
+    }
+
+    fn emitMiscOp(self: WasmAssembler, op: MiscOp) void {
+        self.emitOp(.MiscPrefix);
+        self.emit(@enumToInt(op));
+    }
+
+    fn emitTableGrow(self: WasmAssembler, idx: u32) void {
+        self.emitMiscOp(.TableGrow);
+        self.emitVarU32(idx);
+    }
+
+    fn emitTableInit(self: WasmAssembler, dst: u32, src: u32) void {
+        self.emitMiscOp(.TableInit);
+        self.emitVarU32(dst);
+        self.emitVarU32(src);
+    }
+
+    fn emitBlock(self: WasmAssembler) void {
+        self.emitOp(.Block);
+        self.emit(@enumToInt(WasmSimpleBlockType.Void));
+    }
+
+    fn emitEnd(self: WasmAssembler) void {
+        self.emitOp(.End);
+    }
+
+    fn emitBr(self: WasmAssembler, offset: u32) void {
+        self.emitOp(.Br);
+        self.emitVarU32(offset);
+    }
+
+    fn emitBrIf(self: WasmAssembler, offset: u32) void {
+        self.emitOp(.BrIf);
+        self.emitVarU32(offset);
+    }
+
+    fn emitUnreachable(self: WasmAssembler) void {
+        self.emitOp(.Unreachable);
+    }
+
+    fn emitReturn(self: WasmAssembler) void {
+        self.emitOp(.Return);
+    }
+};
+
+const WasmModuleWriter = struct {
+    writer: WasmWriter = WasmWriter{},
+
+    const SectionId = enum(u8) {
+        Custom = 0,
+        Type = 1,
+        Import = 2,
+        Function = 3,
+        Table = 4,
+        Memory = 5,
+        Global = 6,
+        Export = 7,
+        Start = 8,
+        Elem = 9,
+        Code = 10,
+        Data = 11,
+        DataCount = 12,
+    };
+
+    const DefinitionKind = enum(u8) {
+        Function = 0x00,
+        Table = 0x01,
+        Memory = 0x02,
+        Global = 0x03,
+    };
+
+    const LimitsFlags = enum(u8) {
+        Default = 0x0,
+        HasMaximum = 0x1,
+        IsShared = 0x2,
+        IsI64 = 0x4,
+    };
+
+    const ElemSegmentKind = enum(u8) {
+        Active = 0x0,
+        Passive = 0x1,
+    };
+
+    fn emitMagic(self: *WasmModuleWriter) void {
+        self.writer.emit(0x00);
+        self.writer.emit(0x61);
+        self.writer.emit(0x73);
+        self.writer.emit(0x6d);
+    }
+
+    fn emitVersion(self: *WasmModuleWriter) void {
+        self.writer.emit(0x01);
+        self.writer.emit(0x00);
+        self.writer.emit(0x00);
+        self.writer.emit(0x00);
+    }
+
+    fn emitResultType(self: *WasmModuleWriter, type_: *const WasmResultType) void {
+        self.writer.emitVarU32(type_.items.len);
+        for (type_.items) |t| {
+            self.writer.emitValType(t);
+        }
+    }
+
+    fn emitSectionId(self: *WasmModuleWriter, id: SectionId) void {
+        self.writer.emit(@enumToInt(id));
+    }
+
+    fn emitTypeSection(self: *WasmModuleWriter, types: *const std.ArrayList(WasmFuncType)) void {
+        self.emitSectionId(.Type);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(types.items.len);
+        for (types.items) |type_| {
+            self.writer.emit(0x60);
+            self.emitResultType(&type_.params);
+            self.emitResultType(&type_.results);
+        }
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+
+    fn emitName(self: *WasmModuleWriter, name: []const u8) void {
+        self.writer.emitVarU32(name.len);
+        for (name) |char|
+            self.writer.emit(char);
+    }
+
+    fn emitImportSection(self: *WasmModuleWriter) void {
+        self.emitSectionId(.Import);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(2);
+        self.emitName("env");
+        self.emitName("memory");
+        self.writer.emit(@enumToInt(DefinitionKind.Memory));
+        self.writer.emit(@enumToInt(LimitsFlags.Default));
+        self.writer.emitVarU32(0);
+        self.emitName("env");
+        self.emitName("__indirect_function_table");
+        self.writer.emit(@enumToInt(DefinitionKind.Table));
+        self.writer.emitValType(.FuncRef);
+        self.writer.emit(@enumToInt(LimitsFlags.Default));
+        self.writer.emitVarU32(0);
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+
+    fn emitFunctionSection(self: *WasmModuleWriter, funcs: *const std.ArrayList(WasmFunc)) void {
+        self.emitSectionId(.Function);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(funcs.items.len);
+        for (funcs.items) |func|
+            self.writer.emitVarU32(func.type_idx);
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+
+    fn emitElementSection(self: *WasmModuleWriter, indirect_functions: *const std.ArrayList(u32)) void {
+        if (indirect_functions.items.len == 0) return;
+        self.emitSectionId(.Elem);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(1);
+        self.writer.emit(@enumToInt(ElemSegmentKind.Passive));
+        self.writer.emit(0x00);
+        self.writer.emitVarU32(indirect_functions.items.len);
+        for (indirect_functions.items) |idx|
+            self.writer.emitVarU32(idx);
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+
+    fn emitStartSection(self: *WasmModuleWriter, start_function: u32) void {
+        self.emitSectionId(.Start);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(start_function);
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+
+    fn encodeLocals(locals: *const std.ArrayList(WasmValType)) std.ArrayList(u8) {
+        var runs: u32 = 0;
+        {
+            var local: usize = 0;
+            while (local < locals.items.len) : (runs += 1) {
+                const t = locals.items[local];
+                local += 1;
+                while (local < locals.items.len and locals.items[local] == t) : (local += 1) {}
+            }
+        }
+        var writer = WasmWriter{};
+        writer.emitVarU32(runs);
+        {
+            var local: usize = 0;
+            while (local < locals.items.len) {
+                const t = locals.items[local];
+                local += 1;
+                var count: u32 = 1;
+                while (local < locals.items.len and locals.items[local] == t) {
+                    count += 1;
+                    local += 1;
+                }
+                writer.emitVarU32(count);
+                writer.emitValType(t);
+            }
+        }
+        return writer.finish();
+    }
+
+    fn emitCodeSection(self: *WasmModuleWriter, funcs: *const std.ArrayList(WasmFunc)) void {
+        self.emitSectionId(.Code);
+        const patch_loc = self.writer.emitPatchableVarU32();
+        const start = self.writer.code.items.len;
+        self.writer.emitVarU32(funcs.items.len);
+        for (funcs.items) |func| {
+            const locals = encodeLocals(&func.locals);
+            self.writer.emitVarU32(locals.items.len + func.code.items.len);
+            self.writer.code.appendSlice(locals.items) catch std.process.exit(1);
+            self.writer.code.appendSlice(func.code.items) catch std.process.exit(1);
+        }
+        self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
+    }
+};
+
+const WasmModuleBuilder = struct {
+    types: std.ArrayList(WasmFuncType) = std.ArrayList(WasmFuncType).init(gpa.allocator()),
+    functions: std.ArrayList(WasmFunc) = std.ArrayList(WasmFunc).init(gpa.allocator()),
+    indirect_function_table: std.ArrayList(u32) = std.ArrayList(u32).init(gpa.allocator()),
+    start_function: u32 = @bitCast(u32, @as(i32, -1)),
+
+    fn init() WasmModuleBuilder {
+        return .{};
+    }
+
+    fn finish(self: WasmModuleBuilder) std.ArrayList(u8) {
+        var writer = WasmModuleWriter{};
+        writer.emitMagic();
+        writer.emitVersion();
+        writer.emitTypeSection(&self.types);
+        writer.emitImportSection();
+        writer.emitFunctionSection(&self.functions);
+        if (self.start_function != @bitCast(u32, @as(i32, -1)))
+            writer.emitStartSection(self.start_function);
+        writer.emitElementSection(&self.indirect_function_table);
+        writer.emitCodeSection(&self.functions);
+        return writer.writer.finish();
+    }
+};
+
+const VMCallTypes = struct {
+    initialized: bool = false,
+    Allocate: u32 = undefined,
+    PushRoot: u32 = undefined,
+    GetRoot: u32 = undefined,
+    PopRoots: u32 = undefined,
+    Error: u32 = undefined,
+    Debug: u32 = undefined,
+    Eval: u32 = undefined,
+    JitCall: u32 = undefined,
+    StartFunction: u32 = undefined,
+};
+
+const WasmMacroAssembler = struct {
+    assembler: WasmAssembler = WasmAssembler{},
+
+    module_builder: WasmModuleBuilder = WasmModuleBuilder{},
+    relocs: std.ArrayList(*anyopaque) = std.ArrayList(*anyopaque).init(gpa.allocator()),
+    vm_call_types: VMCallTypes = VMCallTypes{},
+    max_roots: usize = undefined,
+    current_root_count: usize = undefined,
+    current_active_locals: usize = undefined,
+    locals: std.ArrayList(WasmValType) = std.ArrayList(WasmValType).init(gpa.allocator()),
+
+    const UnrootedEnvLocalIdx = 0;
+    const HeapLocalIdx = 1;
+    const ParamCount = 2;
+
+    fn emitRelocations(self: WasmMacroAssembler) void {
+        _ = self;
+    }
+
+    fn endModule(self: WasmMacroAssembler) std.ArrayList(u8) {
+        self.emitRelocations();
+        return self.module_builder.finish();
+    }
+};
+
+const WasmCompiler = struct {
+    masm: WasmMacroAssembler = WasmMacroAssembler{},
+
+    fn init() WasmCompiler {
+        return .{};
+    }
+
+    fn compileFunction(self: WasmCompiler, func: *Func) void {
+        _ = self;
+        _ = func;
+    }
+
+    fn finish(self: WasmCompiler) std.ArrayList(u8) {
+        return self.masm.endModule();
+    }
+};
+
+const WasmModule = struct {
+    data: std.ArrayList(u8),
+};
+
+export fn jitModule() ?*WasmModule {
+    if (jit_candidates.count() == 0)
+        return null;
+
+    var comp = WasmCompiler.init();
+    var it = jit_candidates.keyIterator();
+    while (it.next()) |f| {
+        comp.compileFunction(f.*);
+    }
+    jit_candidates.clearAndFree();
+    var module_ptr = gpa.allocator().create(WasmModule) catch std.process.exit(3);
+    module_ptr.* = .{ .data = comp.finish() };
+    return module_ptr;
+}
+
+export fn moduleData(mod: *WasmModule) [*]u8 {
+    return mod.data.items.ptr;
+}
+
+export fn moduleSize(mod: *WasmModule) usize {
+    return mod.data.items.len;
+}
+
+export fn freeModule(mod: *WasmModule) void {
+    gpa.allocator().destroy(mod);
 }
 
 export fn allocateBytes(len: usize) *anyopaque {
