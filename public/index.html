@@ -44,6 +44,27 @@
         function throw_error() {
           throw new Error();
         }
+
+        const textDecoder = new TextDecoder();
+
+        function stringAt(p, l) {
+          return textDecoder.decode(
+            new Uint8Array(instance.exports.memory.buffer, p, l),
+          );
+        }
+
+        const env = {
+          throw_error,
+          exit(code) {
+            throw new Error(code);
+          },
+          consoleLogString(p, l) {
+            const out = stringAt(p, l);
+            console.log(out);
+            print(`${out}`, 'pre');
+          },
+        };
+
         // WASI polyfill that's enough to implement fwrite(stdout, "foo");
         const wasi_snapshot_preview1 = {
           fd_close(fd) {
@@ -97,13 +118,8 @@
           },
         };
 
-        let imports = {
-          env: {
-            throw_error,
-            exit(code) {
-              throw new Error(code);
-            },
-          },
+        const imports = {
+          env,
           wasi_snapshot_preview1,
         };
         let { mod, instance } = await WebAssembly.instantiateStreaming(

@@ -7,16 +7,28 @@ var gpa = GeneralPurposeAllocator(.{}){};
 var arena: ArenaAllocator = ArenaAllocator.init(gpa.allocator());
 // var arena: ArenaAllocator = undefined;
 
+extern fn consoleLogString(p: [*]const u8, l: usize) void;
+
+fn logString(string: []const u8) void {
+    consoleLogString(string.ptr, string.len);
+}
+
 pub fn main() anyerror!void {
     arena = ArenaAllocator.init(gpa.allocator());
 }
 
 pub fn log(
-    comptime _: std.log.Level,
-    comptime _: @TypeOf(.EnumLiteral),
-    comptime _: []const u8,
-    _: anytype,
-) void {}
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = message_level;
+    _ = scope;
+    var buffer: [100]u8 = undefined;
+    const string = std.fmt.bufPrint(buffer[0..], format, args) catch std.process.exit(2);
+    logString(string);
+}
 
 pub const os = struct {
     pub const system = struct {
@@ -223,7 +235,7 @@ const Parser = struct {
     fn lookupBound(self: Parser, id: []const u8) u32 {
         var i: usize = 0;
         while (i < self.bound_vars.items.len) : (i += 1) {
-            if (self.bound_vars.items[self.bound_vars.items.len - i - 1].ptr == id.ptr)
+            if (std.mem.eql(u8, self.bound_vars.items[self.bound_vars.items.len - i - 1], id))
                 return i;
         }
         signalError("unbound identifier", id);
