@@ -4,7 +4,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator;
 
 var gpa = GeneralPurposeAllocator(.{}){};
-var arena: ArenaAllocator = undefined;
+var arena: ArenaAllocator = ArenaAllocator.init(gpa.allocator());
+// var arena: ArenaAllocator = undefined;
 
 pub fn main() anyerror!void {
     arena = ArenaAllocator.init(gpa.allocator());
@@ -23,11 +24,11 @@ pub const os = struct {
     };
 };
 
-fn throwError() void {
+fn throwError() noreturn {
     std.process.exit(1);
 }
 
-fn signalError(message: []const u8, what_: ?[]const u8) void {
+fn signalError(message: []const u8, what_: ?[]const u8) noreturn {
     if (what_) |what| {
         std.log.err("error: {s}: {s}\n", .{ message, what });
     } else {
@@ -410,6 +411,484 @@ const Parser = struct {
 export fn parse(str: [*:0]const u8) ?*const Expr {
     var parser = Parser.init(arena.allocator(), str);
     return parser.parse();
+}
+
+const HeapObject = struct {
+    const Kind = enum(usize) {
+        Env,
+        Closure,
+    };
+
+    const NotForwardedBit: usize = 1;
+    const NotForwardedBits: usize = 1;
+    const NotForwardedBitMask: usize = (1 << NotForwardedBits) - 1;
+
+    fn offsetOfTag() usize {
+        return @offsetOf(HeapObject, "tag");
+    }
+
+    tag: usize,
+
+    // fn init(kind: Kind) HeapObject {
+    //     return .{
+    //         .tag = (@enumToInt(kind) << NotForwardedBits) | NotForwardedBit,
+    //     };
+    // }
+
+    fn init(heap: *Heap, bytes: usize, kind_: Kind) HeapObject {
+        var self = heap.allocate(bytes);
+        self.* = .{
+            .tag = (@enumToInt(kind_) << NotForwardedBits) | NotForwardedBit,
+        };
+        return self.*;
+    }
+
+    fn isForwarded(self: HeapObject) bool {
+        return (self.tag & NotForwardedBit) == 0;
+    }
+
+    fn forwarded(self: HeapObject) *HeapObject {
+        return @intToPtr(*HeapObject, self.tag);
+    }
+
+    fn forward(self: *HeapObject, new_loc: *HeapObject) void {
+        self.tag = @ptrToInt(new_loc);
+    }
+
+    fn kind(self: HeapObject) Kind {
+        return @intToEnum(Kind, self.tag >> 1);
+    }
+
+    fn isEnv(self: HeapObject) bool {
+        return self.kind() == .Env;
+    }
+
+    fn isClosure(self: HeapObject) bool {
+        return self.kind() == .Closure;
+    }
+
+    fn asEnv(self: *HeapObject) *Env {
+        return @fieldParentPtr(Env, "obj", self);
+    }
+
+    fn asClosure(self: *HeapObject) *Closure {
+        return @fieldParentPtr(Closure, "obj", self);
+    }
+
+    fn kindName(self: HeapObject) []const u8 {
+        return @tagName(self.kind());
+    }
+};
+
+const Heap = struct {
+    hp: usize,
+    limit: usize,
+    base: usize,
+    size: usize,
+    count: i32,
+    mem: []u8,
+    roots: std.ArrayList(Value),
+
+    const ALIGNMENT: usize = 8;
+
+    fn alignUp(val: usize) usize {
+        return (val + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    }
+
+    fn pushRoot(heap: *Heap, v: Value) usize {
+        const ret = heap.roots.items.len;
+        heap.roots.append(v) catch std.process.exit(1);
+        return ret;
+    }
+
+    fn getRoot(heap: *Heap, idx: usize) Value {
+        return heap.roots.items[idx];
+    }
+
+    fn setRoot(heap: *Heap, idx: usize, v: Value) void {
+        heap.roots.items[idx] = v;
+    }
+
+    fn popRoot(heap: *Heap) void {
+        _ = heap.roots.pop();
+    }
+
+    fn init(heap_size: usize) Heap {
+        const allocator = gpa.allocator();
+        const mem = allocator.alloc(u8, alignUp(heap_size)) catch signalError("malloc failed", null);
+        const base = @ptrToInt(mem.ptr);
+        var self = Heap{
+            .hp = base,
+            .limit = undefined,
+            .base = base,
+            .size = heap_size,
+            .count = -1,
+            .mem = mem,
+            .roots = std.ArrayList(Value).init(allocator),
+        };
+        self.flip();
+        return self;
+    }
+
+    fn deinit(self: *Heap) void {
+        const allocator = gpa.allocator();
+        allocator.free(self.mem);
+        self.roots.deinit();
+    }
+
+    fn flip(self: *Heap) void {
+        const split = self.base + (self.size >> 1);
+        if (self.hp <= split) {
+            self.hp = split;
+            self.limit = self.base + self.size;
+        } else {
+            self.hp = self.base;
+            self.limit = split;
+        }
+        self.count += 1;
+    }
+
+    fn copy(self: *Heap, obj: *HeapObject) *HeapObject {
+        const size = switch (obj.kind()) {
+            .Env => obj.asEnv().byteSize(),
+            .Closure => obj.asClosure().byteSize(),
+        };
+        const new_obj = @intToPtr(*HeapObject, self.hp);
+        std.mem.copy(u8, @ptrCast([*]u8, new_obj)[0..size], @ptrCast([*]u8, obj)[0..size]);
+        obj.forward(new_obj);
+        self.hp += alignUp(size);
+        return new_obj;
+    }
+
+    fn scan(self: *Heap, obj: *HeapObject) usize {
+        switch (obj.kind()) {
+            .Env => {
+                obj.asEnv().visitFields(self);
+                return obj.asEnv().byteSize();
+            },
+            .Closure => {
+                obj.asClosure().visitFields(self);
+                return obj.asClosure().byteSize();
+            },
+            // else => abort(),
+        }
+    }
+
+    fn visitRoots(self: Heap) void {
+        for (self.roots.items) |root| {
+            root.visitFields(self);
+        }
+    }
+
+    fn collect(self: *Heap) void {
+        self.flip();
+        var grey = self.hp;
+        while (grey < self.hp)
+            grey += alignUp(self.scan(@intToPtr(*HeapObject, grey)));
+    }
+
+    fn visit(self: *Heap, comptime T: type, loc: *?*T) void {
+        const obj_ = loc.*;
+        if (obj_) |obj| {
+            if (T == HeapObject) {
+                loc.* = if (obj.isForwarded()) obj.forwarded() else self.copy(obj);
+            } else {
+                loc.* = @fieldParentPtr(T, "obj", if (obj.obj.isForwarded()) obj.obj.forwarded() else self.copy(&obj.obj));
+            }
+        }
+    }
+
+    fn allocate(self: *Heap, size: usize) *HeapObject {
+        while (true) {
+            const addr = self.hp;
+            const new_hp = alignUp(addr + size);
+            if (self.limit < new_hp) {
+                self.collect();
+                if (self.limit - self.hp < size)
+                    signalError("ran out of space", null);
+                continue;
+            }
+            self.hp = new_hp;
+            return @intToPtr(*HeapObject, addr);
+        }
+    }
+};
+
+const Value = struct {
+    payload: usize,
+
+    const HeapObjectTag: usize = 0;
+    const SmiTag: usize = 1;
+    const TagBits: usize = 1;
+    const TagMask: usize = (1 << TagBits) - 1;
+
+    fn init(obj: *HeapObject) Value {
+        return .{
+            .payload = @ptrToInt(obj),
+        };
+    }
+
+    fn initVal(val: isize) Value {
+        return .{
+            .payload = (@intCast(usize, val) << TagBits) | SmiTag,
+        };
+    }
+
+    fn initBool(b: bool) Value {
+        return initVal(@boolToInt(b));
+    }
+
+    fn isSmi(self: Value) bool {
+        return self.payload & TagBits == SmiTag;
+    }
+
+    fn isHeapObject(self: Value) bool {
+        return self.payload & TagMask == HeapObjectTag;
+    }
+
+    fn getSmi(self: Value) isize {
+        return @intCast(isize, self.payload) >> TagBits;
+    }
+
+    fn getHeapObject(self: Value) *HeapObject {
+        return @intToPtr(*HeapObject, self.payload & ~HeapObjectTag);
+    }
+
+    fn bits(self: Value) usize {
+        return self.payload;
+    }
+
+    fn kindName(self: Value) []const u8 {
+        return if (self.isSmi()) "small integer" else self.getHeapObject().kindName();
+    }
+
+    fn isEnv(self: Value) bool {
+        return self.isHeapObject() and self.getHeapObject().isEnv();
+    }
+
+    fn isClosure(self: Value) bool {
+        return self.isHeapObject() and self.getHeapObject().isClosure();
+    }
+
+    fn asEnv(self: *Value) *Env {
+        return self.getHeapObject().asEnv();
+    }
+
+    fn asClosure(self: *Value) *Closure {
+        return self.getHeapObject().asClosure();
+    }
+
+    fn visitFields(self: Value, heap: *Heap) void {
+        if (self.isHeapObject())
+            heap.visit(HeapObject, @ptrCast(*?*HeapObject, &self.payload));
+    }
+};
+
+fn Rooted(comptime T: type) type {
+    return struct {
+        heap: *Heap,
+        idx: usize,
+
+        const Self = @This();
+
+        fn init(heap: *Heap, obj: if (T == Value) Value else ?*T) Self {
+
+        // fn init(heap: *Heap, obj: *T) Self {
+            return .{
+                // TODO: check this
+                .heap = heap,
+                // .heap = Heap.init(heap),
+                .idx = Heap.pushRoot(heap, if (T == Value) obj else Value.init(&obj.?.obj)),
+            };
+        }
+
+        fn deinit(self: Self) void {
+            Heap.popRoot(self.heap);
+        }
+
+        fn get(self: Self) if (T == Value) Value else *T {
+            const root = Heap.getRoot(self.heap, self.idx);
+            return if (T == Value) root else @fieldParentPtr(T, "obj", root.getHeapObject());
+        }
+
+        fn set(self: *Self, obj: if (T == Value) Value else *T) void {
+            Heap.setRoot(self.heap, self.idx, if (T == Value) obj else Value.init(&obj.obj));
+        }
+    };
+}
+
+const Env = struct {
+    obj: HeapObject,
+    prev: *Env,
+    val: Value,
+
+    fn offsetOfPrev() usize {
+        return @offsetOf(Env, "prev");
+    }
+
+    fn offsetOfVal() usize {
+        return @offsetOf(Env, "val");
+    }
+
+    fn lookup(env: *Env, depth: u32) Value {
+        var depth_ = depth;
+        var env_ = env;
+        while (depth_ > 0) {
+            depth_ -= 1;
+            env_ = env_.prev;
+        }
+        return env_.val;
+    }
+
+    fn init(heap: *Heap, prev: *Rooted(Env), val: *Rooted(Value)) Env {
+        return .{
+            .obj = HeapObject.init(heap, @sizeOf(Env), .Env),
+            .prev = prev.get(),
+            .val = val.get(),
+        };
+    }
+
+    fn byteSize(self: Env) usize {
+        return @sizeOf(@TypeOf(self));
+    }
+
+    fn visitFields(self: *Env, heap: *Heap) void {
+        heap.visit(Env, @ptrCast(*?*Env, &self.prev));
+        self.val.visitFields(heap);
+    }
+};
+
+const Closure = struct {
+    obj: HeapObject,
+    env: *Env,
+    func: *const Func,
+
+    fn offsetOfEnv() usize {
+        return @offsetOf(Closure, "env");
+    }
+
+    fn offsetOfFunc() usize {
+        return @offsetOf(Closure, "func");
+    }
+
+    fn init(heap: *Heap, env: *Rooted(Env), func: *const Func) Closure {
+        return .{
+            .obj = HeapObject.init(heap, @sizeOf(Closure), .Closure),
+            .env = env.get(),
+            .func = func,
+        };
+    }
+
+    fn byteSize(self: Closure) usize {
+        return @sizeOf(@TypeOf(self));
+    }
+
+    fn visitFields(self: *Closure, heap: *Heap) void {
+        heap.visit(Env, @ptrCast(*?*Env, &self.env));
+    }
+};
+
+fn evalPrimcall(op: Prim.Op, lhs: isize, rhs: isize) Value {
+    switch (op) {
+        .Eq => return Value.initBool(lhs == rhs),
+        .LessThan => return Value.initBool(lhs < rhs),
+        .Add => return Value.initVal(lhs + rhs),
+        .Sub => return Value.initVal(lhs - rhs),
+        .Mul => return Value.initVal(lhs * rhs),
+        // else => {
+        //     signalError("unexpected primcall op", null);
+        //     return Value.init(null);
+        // },
+    }
+}
+
+// var jit_candidates: std.AutoHashMap(*Func, void);
+var jit_candidates = std.AutoHashMap(*const Func, void).init(gpa.allocator());
+
+const JitFunction = fn (*Env, *Heap) Value;
+
+fn eval_(expr_arg: *const Expr, unrooted_env: ?*Env, heap: *Heap) Value {
+    var env = Rooted(Env).init(heap, unrooted_env);
+    var expr = expr_arg;
+
+    tail: while (true) {
+        switch (expr.kind) {
+            .Func => {
+                const func = @fieldParentPtr(Func, "expr", expr);
+                if (func.jit_code == null)
+                    jit_candidates.put(func, {}) catch std.process.exit(1);
+                var closure = Closure.init(heap, &env, func);
+                return Value.init(&closure.obj);
+            },
+            .Var => {
+                const var_ = @fieldParentPtr(Var, "expr", expr);
+                return Env.lookup(env.get(), var_.depth);
+            },
+            .Prim => {
+                const prim = @fieldParentPtr(Prim, "expr", expr);
+                const lhs = eval_(prim.lhs, env.get(), heap);
+                if (!lhs.isSmi())
+                    signalError("primcall expected integer lhs, got", lhs.kindName());
+                const rhs = eval_(prim.rhs, env.get(), heap);
+                if (!rhs.isSmi())
+                    signalError("primcall expected integer rhs, got", rhs.kindName());
+                return evalPrimcall(prim.op, lhs.getSmi(), rhs.getSmi());
+            },
+            .Literal => {
+                const literal = @fieldParentPtr(Literal, "expr", expr);
+                return Value.initVal(literal.val);
+            },
+            .Call => {
+                const call = @fieldParentPtr(Call, "expr", expr);
+                const func = Rooted(Value).init(heap, eval_(call.func, env.get(), heap));
+                var func_val = func.get();
+                if (!func_val.isClosure())
+                    signalError("call expected closure, got", func_val.kindName());
+                var arg = Rooted(Value).init(heap, eval_(call.arg, env.get(), heap));
+                const closure = func_val.asClosure();
+                var closure_env = Rooted(Env).init(heap, closure.env);
+                var call_env = Env.init(heap, &closure_env, &arg);
+                if (closure.func.jit_code) |jit_code| {
+                    const f = @ptrCast(*const JitFunction, jit_code);
+                    return f(&call_env, heap);
+                } else {
+                    expr = closure.func.body;
+                    env.set(&call_env);
+                    continue :tail;
+                }
+            },
+            .LetRec => {
+                const letrec = @fieldParentPtr(LetRec, "expr", expr);
+                {
+                    var filler = Rooted(Value).init(heap, Value.initVal(0));
+                    var letrec_env = Env.init(heap, &env, &filler);
+                    env.set(&letrec_env);
+                }
+                const arg = eval_(letrec.arg, env.get(), heap);
+                env.get().val = arg;
+                expr = letrec.body;
+                continue :tail;
+            },
+            .If => {
+                const if_ = @fieldParentPtr(If, "expr", expr);
+                const test_ = eval_(if_.test_, env.get(), heap);
+                if (!test_.isSmi())
+                    signalError("if expected integer, got", test_.kindName());
+                expr = if (test_.getSmi() != 0) if_.consequent else if_.alternate;
+                continue :tail;
+            },
+            // else => {
+            //     signalError("unexpected expr kind", null);
+            //     return Value.init(null);
+            // },
+        }
+    }
+}
+
+export fn eval(expr: *Expr, heap_size: usize) void {
+    var heap = Heap.init(heap_size);
+    const res = eval_(expr, null, &heap);
+    std.log.info("result: {}", .{res.getSmi()});
 }
 
 export fn allocateBytes(len: usize) *anyopaque {
