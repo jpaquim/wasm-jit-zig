@@ -25,7 +25,7 @@ pub fn log(
 ) void {
     _ = message_level;
     _ = scope;
-    var buffer: [100]u8 = undefined;
+    var buffer: [200]u8 = undefined;
     const string = std.fmt.bufPrint(buffer[0..], format, args) catch std.process.exit(2);
     logString(string);
 }
@@ -242,7 +242,7 @@ const Parser = struct {
         return @bitCast(u32, @as(i32, -1));
     }
 
-    fn err(self: Parser, message: []const u8) void {
+    fn err(self: Parser, message: []const u8) noreturn {
         signalError(message, if (self.eof()) self.buf[0..self.len] else self.buf[self.pos..self.len]);
     }
 
@@ -290,7 +290,7 @@ const Parser = struct {
         if (match_len < (self.len - self.pos))
             return false;
         // if (strncmp(self.buf + self.pos, literal, match_len) != 0)
-        if (!std.mem.eql(u8, self.buf[self.pos .. self.pos + self.len], literal))
+        if (!std.mem.eql(u8, self.buf[self.pos .. self.pos + match_len], literal))
             return false;
         if ((self.len - self.pos) < match_len and isAlphaNumeric(self.buf[self.pos + match_len]))
             return false;
@@ -421,8 +421,11 @@ const Parser = struct {
 };
 
 export fn parse(str: [*:0]const u8) ?*const Expr {
+    std.log.info("parser input: {s}", .{str});
     var parser = Parser.init(arena.allocator(), str);
-    return parser.parse();
+    const result = parser.parse();
+    std.log.info("parser output: {}", .{result.?});
+    return result;
 }
 
 const HeapObject = struct {
@@ -634,7 +637,7 @@ const Value = struct {
     const TagBits: usize = 1;
     const TagMask: usize = (1 << TagBits) - 1;
 
-    fn init(obj: *HeapObject) Value {
+    fn init(obj: ?*HeapObject) Value {
         return .{
             .payload = @ptrToInt(obj),
         };
@@ -662,8 +665,8 @@ const Value = struct {
         return @intCast(isize, self.payload) >> TagBits;
     }
 
-    fn getHeapObject(self: Value) *HeapObject {
-        return @intToPtr(*HeapObject, self.payload & ~HeapObjectTag);
+    fn getHeapObject(self: Value) ?*HeapObject {
+        return @intToPtr(?*HeapObject, self.payload & ~HeapObjectTag);
     }
 
     fn bits(self: Value) usize {
@@ -671,15 +674,15 @@ const Value = struct {
     }
 
     fn kindName(self: Value) []const u8 {
-        return if (self.isSmi()) "small integer" else self.getHeapObject().kindName();
+        return if (self.isSmi()) "small integer" else self.getHeapObject().?.kindName();
     }
 
     fn isEnv(self: Value) bool {
-        return self.isHeapObject() and self.getHeapObject().isEnv();
+        return self.isHeapObject() and self.getHeapObject().?.isEnv();
     }
 
     fn isClosure(self: Value) bool {
-        return self.isHeapObject() and self.getHeapObject().isClosure();
+        return self.isHeapObject() and self.getHeapObject().?.isClosure();
     }
 
     fn asEnv(self: *Value) *Env {
@@ -687,7 +690,7 @@ const Value = struct {
     }
 
     fn asClosure(self: *Value) *Closure {
-        return self.getHeapObject().asClosure();
+        return self.getHeapObject().?.asClosure();
     }
 
     fn visitFields(self: Value, heap: *Heap) void {
@@ -705,12 +708,12 @@ fn Rooted(comptime T: type) type {
 
         fn init(heap: *Heap, obj: if (T == Value) Value else ?*T) Self {
 
-        // fn init(heap: *Heap, obj: *T) Self {
+            // fn init(heap: *Heap, obj: *T) Self {
             return .{
                 // TODO: check this
                 .heap = heap,
                 // .heap = Heap.init(heap),
-                .idx = Heap.pushRoot(heap, if (T == Value) obj else Value.init(&obj.?.obj)),
+                .idx = Heap.pushRoot(heap, if (T == Value) obj else Value.init(if (obj == null) null else &obj.?.obj)),
             };
         }
 
@@ -718,9 +721,12 @@ fn Rooted(comptime T: type) type {
             Heap.popRoot(self.heap);
         }
 
-        fn get(self: Self) if (T == Value) Value else *T {
+        fn get(self: Self) if (T == Value) Value else ?*T {
             const root = Heap.getRoot(self.heap, self.idx);
-            return if (T == Value) root else @fieldParentPtr(T, "obj", root.getHeapObject());
+            return if (T == Value) root else {
+                const obj = root.getHeapObject();
+                return if (obj == null) null else @fieldParentPtr(T, "obj", obj.?);
+            };
         }
 
         fn set(self: *Self, obj: if (T == Value) Value else *T) void {
@@ -755,7 +761,7 @@ const Env = struct {
     fn init(heap: *Heap, prev: *Rooted(Env), val: *Rooted(Value)) Env {
         return .{
             .obj = HeapObject.init(heap, @sizeOf(Env), .Env),
-            .prev = prev.get(),
+            .prev = prev.get().?,
             .val = val.get(),
         };
     }
@@ -772,7 +778,7 @@ const Env = struct {
 
 const Closure = struct {
     obj: HeapObject,
-    env: *Env,
+    env: ?*Env,
     func: *const Func,
 
     fn offsetOfEnv() usize {
@@ -796,7 +802,7 @@ const Closure = struct {
     }
 
     fn visitFields(self: *Closure, heap: *Heap) void {
-        heap.visit(Env, @ptrCast(*?*Env, &self.env));
+        heap.visit(Env, &self.env);
     }
 };
 
@@ -834,7 +840,7 @@ fn eval_(expr_arg: *const Expr, unrooted_env: ?*Env, heap: *Heap) Value {
             },
             .Var => {
                 const var_ = @fieldParentPtr(Var, "expr", expr);
-                return Env.lookup(env.get(), var_.depth);
+                return Env.lookup(env.get().?, var_.depth);
             },
             .Prim => {
                 const prim = @fieldParentPtr(Prim, "expr", expr);
@@ -877,7 +883,7 @@ fn eval_(expr_arg: *const Expr, unrooted_env: ?*Env, heap: *Heap) Value {
                     env.set(&letrec_env);
                 }
                 const arg = eval_(letrec.arg, env.get(), heap);
-                env.get().val = arg;
+                env.get().?.val = arg;
                 expr = letrec.body;
                 continue :tail;
             },
