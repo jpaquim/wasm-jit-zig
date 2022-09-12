@@ -21,8 +21,8 @@ pub fn log(
 ) void {
     _ = message_level;
     _ = scope;
-    var buffer: [200]u8 = undefined;
-    const string = std.fmt.bufPrint(buffer[0..], format, args) catch std.process.exit(2);
+    const string = std.fmt.allocPrint(gpa.allocator(), format, args) catch memError();
+    defer gpa.allocator().free(string);
     logString(string);
 }
 
@@ -778,7 +778,7 @@ fn Rooted(comptime T: type) type {
 
 const Env = struct {
     obj: HeapObject,
-    prev: *Env,
+    prev: ?*Env,
     val: Value,
 
     fn offsetOfPrev() usize {
@@ -794,7 +794,7 @@ const Env = struct {
         var env_ = env;
         while (depth_ > 0) {
             depth_ -= 1;
-            env_ = env_.prev;
+            env_ = env_.prev.?;
         }
         return env_.val;
     }
@@ -802,7 +802,7 @@ const Env = struct {
     fn init(heap: *Heap, prev: *Rooted(Env), val: *Rooted(Value)) Env {
         return .{
             .obj = HeapObject.init(heap, @sizeOf(Env), .Env),
-            .prev = prev.get().?,
+            .prev = prev.get(),
             .val = val.get(),
         };
     }
@@ -2029,9 +2029,9 @@ export fn jitModule() ?*WasmModule {
         comp.compileFunction(f.*);
     }
     jit_candidates.clearAndFree();
-    var module_ptr = gpa.allocator().create(WasmModule) catch std.process.exit(3);
-    module_ptr.* = .{ .data = comp.finish() };
-    return module_ptr;
+    var mod = gpa.allocator().create(WasmModule) catch memError();
+    mod.data = comp.finish();
+    return mod;
 }
 
 export fn moduleData(mod: *WasmModule) [*]u8 {

@@ -168,6 +168,9 @@
           instance.exports.__indirect_function_table;
         const bytes = memory.buffer.slice(data, data + size);
         instance.exports.freeModule(ptr);
+        const str = String.fromCharCode.apply(null, new Uint8Array(bytes));
+        const str_b64 = btoa(str);
+        console.log({ str, str_b64 });
         const mod = new WebAssembly.Module(bytes);
         const env = { throw_error, memory, __indirect_function_table };
         const imports = { env };
