@@ -45,6 +45,10 @@ fn signalError(message: []const u8, what_: ?[]const u8) noreturn {
     throwError();
 }
 
+fn memError() noreturn {
+    std.process.exit(255);
+}
+
 const Expr = struct {
     const Kind = enum {
         Func,
@@ -87,7 +91,7 @@ const Func = struct {
     }
 
     fn initAlloc(body: *Expr) *Func {
-        var self = gpa.allocator().create(Func) catch std.process.exit(1);
+        var self = gpa.allocator().create(Func) catch memError();
         self.* = init(body);
         return self;
     }
@@ -109,7 +113,7 @@ const LetRec = struct {
     }
 
     fn initAlloc(arg: *Expr, body: *Expr) *LetRec {
-        var self = gpa.allocator().create(LetRec) catch std.process.exit(1);
+        var self = gpa.allocator().create(LetRec) catch memError();
         self.* = init(arg, body);
         return self;
     }
@@ -127,7 +131,7 @@ const Var = struct {
     }
 
     fn initAlloc(depth: u32) *Var {
-        var self = gpa.allocator().create(Var) catch std.process.exit(1);
+        var self = gpa.allocator().create(Var) catch memError();
         self.* = init(depth);
         return self;
     }
@@ -157,7 +161,7 @@ const Prim = struct {
     }
 
     fn initAlloc(op: Op, lhs: *Expr, rhs: *Expr) *Prim {
-        var self = gpa.allocator().create(Prim) catch std.process.exit(1);
+        var self = gpa.allocator().create(Prim) catch memError();
         self.* = init(op, lhs, rhs);
         return self;
     }
@@ -175,7 +179,7 @@ const Literal = struct {
     }
 
     fn initAlloc(val: i32) *Literal {
-        var self = gpa.allocator().create(Literal) catch std.process.exit(1);
+        var self = gpa.allocator().create(Literal) catch memError();
         self.* = init(val);
         return self;
     }
@@ -195,7 +199,7 @@ const Call = struct {
     }
 
     fn initAlloc(func: *Expr, arg: *Expr) *Call {
-        var self = gpa.allocator().create(Call) catch std.process.exit(1);
+        var self = gpa.allocator().create(Call) catch memError();
         self.* = init(func, arg);
         return self;
     }
@@ -217,7 +221,7 @@ const If = struct {
     }
 
     fn initAlloc(test_: *Expr, consequent: *Expr, alternate: *Expr) *If {
-        var self = gpa.allocator().create(If) catch std.process.exit(1);
+        var self = gpa.allocator().create(If) catch memError();
         self.* = init(test_, consequent, alternate);
         return self;
     }
@@ -263,7 +267,7 @@ const Parser = struct {
     }
 
     fn pushBound(self: *Parser, id: []const u8) void {
-        self.bound_vars.append(id) catch std.process.exit(1);
+        self.bound_vars.append(id) catch memError();
     }
 
     fn popBound(self: *Parser) void {
@@ -549,7 +553,7 @@ const Heap = struct {
 
     fn pushRoot(heap: *Heap, v: Value) usize {
         const ret = heap.roots.items.len;
-        heap.roots.append(v) catch std.process.exit(1);
+        heap.roots.append(v) catch memError();
         return ret;
     }
 
@@ -871,7 +875,7 @@ fn eval_(expr_arg: *Expr, unrooted_env: ?*Env, heap: *Heap) Value {
             .Func => {
                 const func = @fieldParentPtr(Func, "expr", expr);
                 if (func.jit_code == null)
-                    jit_candidates.put(func, {}) catch std.process.exit(1);
+                    jit_candidates.put(func, {}) catch memError();
                 var closure = Closure.init(heap, &env, func);
                 return Value.init(&closure.obj);
             },
@@ -958,7 +962,8 @@ const WasmValType = enum(u8) {
     FuncRef = 0x70, // SLEB128(-0x10)
 };
 
-const WasmResultType = std.ArrayList(WasmValType);
+// const WasmResultType = std.ArrayList(WasmValType);
+const WasmResultType = []const WasmValType;
 
 const WasmFuncType = struct {
     params: WasmResultType,
@@ -979,7 +984,7 @@ const WasmWriter = struct {
     }
 
     fn emit(self: *WasmWriter, byte: u8) void {
-        self.code.append(byte) catch std.process.exit(1);
+        self.code.append(byte) catch memError();
     }
 
     fn emitVarU32(self: *WasmWriter, i_: u32) void {
@@ -998,9 +1003,9 @@ const WasmWriter = struct {
         var i = i_;
         var done: bool = undefined;
         while (true) {
-            var byte = i & 0x7f;
-            i >> 7;
-            done = ((i == 0) and !(byte & 0x40)) or ((i == -1) and (byte & 0x40));
+            var byte = @intCast(u8, i & 0x7f);
+            i >>= 7;
+            done = ((i == 0) and (byte & 0x40) == 0) or ((i == -1) and (byte & 0x40) != 0);
             if (!done)
                 byte |= 0x80;
             self.emit(byte);
@@ -1027,7 +1032,7 @@ const WasmWriter = struct {
             i += 1;
             val >>= 7;
         }) {
-            var byte = val & 0x7f;
+            var byte = @intCast(u8, val & 0x7f);
             if (i < 4)
                 byte |= 0x80;
             self.code.items[offset + i] = byte;
@@ -1115,159 +1120,159 @@ const WasmAssembler = struct {
         TableInit = 0x0c,
     };
 
-    fn emitOp(self: WasmAssembler, op: Op) void {
-        self.emit(@enumToInt(op));
+    fn emitOp(self: *WasmAssembler, op: Op) void {
+        self.writer.emit(@enumToInt(op));
     }
 
-    fn emitPatchableI32Const(self: WasmAssembler) void {
+    fn emitPatchableI32Const(self: *WasmAssembler) void {
         self.emitOp(.I32Const);
         return self.writer.emitPatchableVarI32();
     }
 
-    fn emitI32Const(self: WasmAssembler, val: i32) void {
+    fn emitI32Const(self: *WasmAssembler, val: i32) void {
         self.emitOp(.I32Const);
-        return self.emitVarI32(val);
+        return self.writer.emitVarI32(val);
     }
 
-    fn emitMemArg(self: WasmAssembler, align_: i32, offset: u32) void {
-        self.writer.emitVarU32(align_);
-        self.writer.emitVarU32(offset);
+    fn emitMemArg(self: *WasmAssembler, align_: i32, offset: u32) void {
+        self.writer.emitVarU32(@intCast(u32, align_));
+        self.writer.emitVarU32(@intCast(u32, offset));
     }
 
     const Int32SizeLog2 = 2;
 
-    fn emitI32Load(self: WasmAssembler, offset: ?u32) void {
+    fn emitI32Load(self: *WasmAssembler, offset: ?u32) void {
         self.emitOp(.I32Load);
         self.emitMemArg(Int32SizeLog2, offset orelse 0);
     }
 
-    fn emitI32Store(self: WasmAssembler, offset: ?u32) void {
+    fn emitI32Store(self: *WasmAssembler, offset: ?u32) void {
         self.emitOp(.I32Store);
         self.emitMemArg(Int32SizeLog2, offset orelse 0);
     }
 
-    fn emitLocalGet(self: WasmAssembler, idx: u32) void {
+    fn emitLocalGet(self: *WasmAssembler, idx: u32) void {
         self.emitOp(.LocalGet);
-        self.emitVarU32(idx);
+        self.writer.emitVarU32(idx);
     }
 
-    fn emitLocalSet(self: WasmAssembler, idx: u32) void {
+    fn emitLocalSet(self: *WasmAssembler, idx: u32) void {
         self.emitOp(.LocalSet);
-        self.emitVarU32(idx);
+        self.writer.emitVarU32(idx);
     }
 
-    fn emitLocalTee(self: WasmAssembler, idx: u32) void {
+    fn emitLocalTee(self: *WasmAssembler, idx: u32) void {
         self.emitOp(.LocalTee);
-        self.emitVarU32(idx);
+        self.writer.emitVarU32(idx);
     }
 
-    fn emitI32Eqz(self: WasmAssembler) void {
+    fn emitI32Eqz(self: *WasmAssembler) void {
         self.emitOp(.I32Eqz);
     }
 
-    fn emitI32Eq(self: WasmAssembler) void {
+    fn emitI32Eq(self: *WasmAssembler) void {
         self.emitOp(.I32Eq);
     }
 
-    fn emitI32Ne(self: WasmAssembler) void {
+    fn emitI32Ne(self: *WasmAssembler) void {
         self.emitOp(.I32Ne);
     }
 
-    fn emitI32LtS(self: WasmAssembler) void {
+    fn emitI32LtS(self: *WasmAssembler) void {
         self.emitOp(.I32LtS);
     }
 
-    fn emitI32LtU(self: WasmAssembler) void {
+    fn emitI32LtU(self: *WasmAssembler) void {
         self.emitOp(.I32LtU);
     }
 
-    fn emitI32Add(self: WasmAssembler) void {
+    fn emitI32Add(self: *WasmAssembler) void {
         self.emitOp(.I32Add);
     }
 
-    fn emitI32Sub(self: WasmAssembler) void {
+    fn emitI32Sub(self: *WasmAssembler) void {
         self.emitOp(.I32Sub);
     }
 
-    fn emitI32Mul(self: WasmAssembler) void {
+    fn emitI32Mul(self: *WasmAssembler) void {
         self.emitOp(.I32Mul);
     }
 
-    fn emitI32And(self: WasmAssembler) void {
+    fn emitI32And(self: *WasmAssembler) void {
         self.emitOp(.I32And);
     }
 
-    fn emitI32Or(self: WasmAssembler) void {
+    fn emitI32Or(self: *WasmAssembler) void {
         self.emitOp(.I32Or);
     }
 
-    fn emitI32Xor(self: WasmAssembler) void {
+    fn emitI32Xor(self: *WasmAssembler) void {
         self.emitOp(.I32Xor);
     }
 
-    fn emitI32Shl(self: WasmAssembler) void {
+    fn emitI32Shl(self: *WasmAssembler) void {
         self.emitOp(.I32Shl);
     }
 
-    fn emitI32ShrS(self: WasmAssembler) void {
+    fn emitI32ShrS(self: *WasmAssembler) void {
         self.emitOp(.I32ShrS);
     }
 
-    fn emitI32ShrU(self: WasmAssembler) void {
+    fn emitI32ShrU(self: *WasmAssembler) void {
         self.emitOp(.I32ShrU);
     }
 
-    fn emitCallIndirect(self: WasmAssembler, callee_type: u32, table: ?u32) void {
+    fn emitCallIndirect(self: *WasmAssembler, callee_type: u32, table: ?u32) void {
         self.emitOp(.CallIndirect);
-        self.emitVarU32(callee_type);
-        self.emitVarU32(table orelse 0);
+        self.writer.emitVarU32(callee_type);
+        self.writer.emitVarU32(table orelse 0);
     }
 
-    fn emitRefNull(self: WasmAssembler, type_: WasmValType) void {
+    fn emitRefNull(self: *WasmAssembler, type_: WasmValType) void {
         self.emitOp(.RefNull);
         self.writer.emitValType(type_);
     }
 
-    fn emitMiscOp(self: WasmAssembler, op: MiscOp) void {
+    fn emitMiscOp(self: *WasmAssembler, op: MiscOp) void {
         self.emitOp(.MiscPrefix);
-        self.emit(@enumToInt(op));
+        self.writer.emit(@enumToInt(op));
     }
 
-    fn emitTableGrow(self: WasmAssembler, idx: u32) void {
+    fn emitTableGrow(self: *WasmAssembler, idx: u32) void {
         self.emitMiscOp(.TableGrow);
-        self.emitVarU32(idx);
+        self.writer.emitVarU32(idx);
     }
 
-    fn emitTableInit(self: WasmAssembler, dst: u32, src: u32) void {
+    fn emitTableInit(self: *WasmAssembler, dst: u32, src: u32) void {
         self.emitMiscOp(.TableInit);
-        self.emitVarU32(dst);
-        self.emitVarU32(src);
+        self.writer.emitVarU32(dst);
+        self.writer.emitVarU32(src);
     }
 
-    fn emitBlock(self: WasmAssembler) void {
+    fn emitBlock(self: *WasmAssembler, block_type: ?WasmValType) void {
         self.emitOp(.Block);
-        self.emit(@enumToInt(WasmSimpleBlockType.Void));
+        self.writer.emit(if (block_type) |t| @enumToInt(t) else @enumToInt(WasmSimpleBlockType.Void));
     }
 
-    fn emitEnd(self: WasmAssembler) void {
+    fn emitEnd(self: *WasmAssembler) void {
         self.emitOp(.End);
     }
 
-    fn emitBr(self: WasmAssembler, offset: u32) void {
+    fn emitBr(self: *WasmAssembler, offset: u32) void {
         self.emitOp(.Br);
-        self.emitVarU32(offset);
+        self.writer.emitVarU32(offset);
     }
 
-    fn emitBrIf(self: WasmAssembler, offset: u32) void {
+    fn emitBrIf(self: *WasmAssembler, offset: u32) void {
         self.emitOp(.BrIf);
-        self.emitVarU32(offset);
+        self.writer.emitVarU32(offset);
     }
 
-    fn emitUnreachable(self: WasmAssembler) void {
+    fn emitUnreachable(self: *WasmAssembler) void {
         self.emitOp(.Unreachable);
     }
 
-    fn emitReturn(self: WasmAssembler) void {
+    fn emitReturn(self: *WasmAssembler) void {
         self.emitOp(.Return);
     }
 };
@@ -1324,9 +1329,10 @@ const WasmModuleWriter = struct {
         self.writer.emit(0x00);
     }
 
-    fn emitResultType(self: *WasmModuleWriter, type_: *const WasmResultType) void {
-        self.writer.emitVarU32(type_.items.len);
-        for (type_.items) |t| {
+    // fn emitResultType(self: *WasmModuleWriter, type_: *const WasmResultType) void {
+    fn emitResultType(self: *WasmModuleWriter, type_: []const WasmValType) void {
+        self.writer.emitVarU32(type_.len);
+        for (type_) |t| {
             self.writer.emitValType(t);
         }
     }
@@ -1342,8 +1348,8 @@ const WasmModuleWriter = struct {
         self.writer.emitVarU32(types.items.len);
         for (types.items) |type_| {
             self.writer.emit(0x60);
-            self.emitResultType(&type_.params);
-            self.emitResultType(&type_.results);
+            self.emitResultType(type_.params);
+            self.emitResultType(type_.results);
         }
         self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
     }
@@ -1442,8 +1448,8 @@ const WasmModuleWriter = struct {
         for (funcs.items) |func| {
             const locals = encodeLocals(&func.locals);
             self.writer.emitVarU32(locals.items.len + func.code.items.len);
-            self.writer.code.appendSlice(locals.items) catch std.process.exit(1);
-            self.writer.code.appendSlice(func.code.items) catch std.process.exit(1);
+            self.writer.code.appendSlice(locals.items) catch memError();
+            self.writer.code.appendSlice(func.code.items) catch memError();
         }
         self.writer.patchVarU32(patch_loc, self.writer.code.items.len - start);
     }
@@ -1455,8 +1461,51 @@ const WasmModuleBuilder = struct {
     indirect_function_table: std.ArrayList(u32) = std.ArrayList(u32).init(gpa.allocator()),
     start_function: u32 = @bitCast(u32, @as(i32, -1)),
 
-    fn init() WasmModuleBuilder {
-        return .{};
+    fn internFuncTypeSlices(self: *WasmModuleBuilder, params: []const WasmValType, results: []const WasmValType) usize {
+        var p = WasmResultType.initCapacity(gpa.allocator(), params.len) catch memError();
+        var r = WasmResultType.initCapacity(gpa.allocator(), results.len) catch memError();
+        p.appendSliceAssumeCapacity(params);
+        r.appendSliceAssumeCapacity(results);
+        return self.internFuncType(&p, &r);
+    }
+    // fn internFuncType(self: *WasmModuleBuilder, params: []WasmResultType, results: []WasmResultType) usize {
+    fn internFuncType(self: *WasmModuleBuilder, params: []const WasmValType, results: []const WasmValType) usize {
+        var i: usize = 0;
+        while (i < self.types.items.len) : (i += 1) {
+            if (self.types.items[i].params.len != params.len)
+                continue;
+            if (self.types.items[i].results.len != results.len)
+                continue;
+            var same = true;
+            var j: usize = 0;
+            while (j < params.len) : (j += 1) {
+                if (self.types.items[i].params[i] != params[i])
+                    same = false;
+            }
+            j = 0;
+            while (j < results.len) : (j += 1) {
+                if (self.types.items[i].results[i] != results[i])
+                    same = false;
+            }
+            if (same)
+                return i;
+        }
+        // self.types.append(WasmFuncType{ .params = params.*, .results = results.* }) catch memError();
+        self.types.append(WasmFuncType{ .params = params, .results = results }) catch memError();
+        return self.types.items.len - 1;
+    }
+
+    fn addFunction(self: *WasmModuleBuilder, type_: u32, locals: std.ArrayList(WasmValType), code: std.ArrayList(u8)) usize {
+        self.functions.append(WasmFunc{ .type_idx = type_, .locals = locals, .code = code }) catch memError();
+        return self.functions.items.len - 1;
+    }
+
+    fn addIndirectFunction(self: *WasmModuleBuilder, idx: u32) void {
+        self.indirect_function_table.append(idx) catch memError();
+    }
+
+    fn recordStartFunction(self: *WasmModuleBuilder, idx: u32) void {
+        self.start_function = idx;
     }
 
     fn finish(self: WasmModuleBuilder) std.ArrayList(u8) {
@@ -1471,6 +1520,44 @@ const WasmModuleBuilder = struct {
         writer.emitElementSection(&self.indirect_function_table);
         writer.emitCodeSection(&self.functions);
         return writer.writer.finish();
+    }
+};
+
+const VMCall = struct {
+    fn Allocate(heap: *Heap, bytes: usize) *anyopaque {
+        return heap.allocate(bytes);
+    }
+
+    fn PushRoot(v: Value, heap: *Heap) usize {
+        const ret = Heap.pushRoot(heap, v);
+        return ret;
+    }
+
+    fn GetRoot(heap: *Heap, idx: usize) Value {
+        return Heap.getRoot(heap, idx);
+    }
+
+    fn PopRoots(heap: *Heap, n_: usize) void {
+        var n = n_;
+        while (n > 0) {
+            n -= 1;
+            Heap.popRoot(heap);
+        }
+    }
+
+    fn Error(msg: []const u8, what: []const u8) void {
+        std.log.err("Error({s}, {s})\n", .{ msg, what });
+        signalError(msg, what);
+    }
+
+    fn Debug(v: usize, what: []const u8) usize {
+        std.log.err("Debug({s}, {})\n", .{ what, v });
+        return v;
+    }
+
+    fn Eval(expr: *Expr, env: *Env, heap: *Heap) Value {
+        std.log.err("Eval({}, {}, {})\n", .{ expr, env, heap });
+        return eval_(expr, env, heap);
     }
 };
 
@@ -1502,11 +1589,239 @@ const WasmMacroAssembler = struct {
     const HeapLocalIdx = 1;
     const ParamCount = 2;
 
-    fn emitRelocations(self: WasmMacroAssembler) void {
+    fn acquireLocal(self: *WasmMacroAssembler, type_opt: ?WasmValType) usize {
+        const type_ = type_opt orelse .I32;
+        var i: usize = self.current_active_locals;
+        while (i < self.locals.items.len) : (i += 1) {
+            if (self.locals.items[i] == type_) {
+                const idx = ParamCount + i;
+                self.current_active_locals = i + 1;
+                return idx;
+            }
+        }
+        self.locals.append(type_) catch memError();
+        self.current_active_locals = ParamCount + self.locals.items.len;
+        return self.current_active_locals - 1;
+    }
+
+    fn releaseLocal(self: *WasmMacroAssembler) void {
+        self.current_active_locals -= 1;
+    }
+
+    fn releaseLocals(self: *WasmMacroAssembler, n_: usize) void {
+        var n = n_;
+        while (n > 0) {
+            n -= 1;
+            self.releaseLocal();
+        }
+    }
+
+    fn emitLoadPointer(self: *WasmMacroAssembler, offset: ?usize) void {
+        self.assembler.emitI32Load(offset orelse 0);
+    }
+
+    fn emitStorePointer(self: *WasmMacroAssembler, offset: ?usize) void {
+        self.assembler.emitI32Store(offset orelse 0);
+    }
+
+    fn emitUnrootedEnv(self: *WasmMacroAssembler) void {
+        self.assembler.emitLocalGet(UnrootedEnvLocalIdx);
+    }
+
+    fn emitHeap(self: *WasmMacroAssembler) void {
+        self.assembler.emitLocalGet(HeapLocalIdx);
+    }
+
+    fn emitVMCall(self: *WasmMacroAssembler, comptime T: type, f: T, type_: u32) void {
+        self.assembler.emitI32Const(@intCast(i32, @ptrToInt(f)));
+        self.assembler.emitCallIndirect(type_, null);
+    }
+
+    fn emitAllocate(self: *WasmMacroAssembler, comptime T: type) void {
+        const bytes = @sizeOf(T);
+        self.emitHeap();
+        self.assembler.emitI32Const(bytes);
+        self.emitVMCall(*const @TypeOf(VMCall.Allocate), &VMCall.Allocate, self.vm_call_types.Allocate);
+    }
+
+    fn emitStoreGCRoot(self: *WasmMacroAssembler) u32 {
+        self.current_root_count += 1;
+        if (self.max_roots < self.current_root_count)
+            self.max_roots = self.current_root_count;
+        const local = self.acquireLocal(null);
+        self.assembler.emitLocalTee(local);
+        self.emitHeap();
+        self.emitVMCall(*const @TypeOf(VMCall.PushRoot), VMCall.PushRoot, self.vm_call_types.PushRoot);
+        self.assembler.emitLocalSet(local);
+        return local;
+    }
+
+    fn emitLoadGCRoot(self: *WasmMacroAssembler, local: u32) void {
+        self.emitHeap();
+        self.assembler.emitLocalGet(local);
+        self.emitVMCall(*const @TypeOf(VMCall.GetRoot), VMCall.GetRoot, self.vm_call_types.GetRoot);
+    }
+
+    fn emitPopGCRootsAndReleaseLocals(self: *WasmMacroAssembler, n: usize) void {
+        self.current_root_count -= n;
+        self.releaseLocals(n);
+        self.emitHeap();
+        self.assembler.emitI32Const(@intCast(i32, n));
+        self.emitVMCall(*const @TypeOf(VMCall.PopRoots), VMCall.PopRoots, self.vm_call_types.PopRoots);
+    }
+
+    fn emitHeapObjectInitTag(self: *WasmMacroAssembler, kind: HeapObject.Kind) void {
+        var val = @enumToInt(kind);
+        val <<= HeapObject.NotForwardedBits;
+        val |= HeapObject.NotForwardedBit;
+        self.assembler.emitI32Const(@intCast(i32, val));
+        self.emitStorePointer(HeapObject.offsetOfTag());
+    }
+
+    fn emitPushConstantPointer(self: *WasmMacroAssembler, ptr: *const anyopaque) void {
+        self.assembler.emitI32Const(@intCast(i32, @ptrToInt(ptr)));
+    }
+
+    fn emitAssertionFailure(self: *WasmMacroAssembler, msg: []const u8, what: []const u8) void {
+        self.emitPushConstantPointer(msg.ptr);
+        self.emitPushConstantPointer(what.ptr);
+        self.emitVMCall(*const @TypeOf(VMCall.Error), VMCall.Error, self.vm_call_types.Error);
+        self.assembler.emitUnreachable();
+    }
+
+    fn emitDebug(self: *WasmMacroAssembler, what: []const u8) void {
+        self.emitPushConstantPointer(what.ptr);
+        self.emitVMCall(*const @TypeOf(VMCall.Debug), VMCall.Debug, self.vm_call_types.Debug);
+    }
+
+    fn emitCheckSmi(self: *WasmMacroAssembler, local_idx: usize, what: []const u8) void {
+        self.assembler.emitBlock(null);
+        self.assembler.emitLocalGet(local_idx);
+        self.assembler.emitI32Const(Value.TagMask);
+        self.assembler.emitI32And();
+        self.assembler.emitI32Const(Value.SmiTag);
+        self.assembler.emitI32Eq();
+        self.assembler.emitBrIf(0);
+        self.emitAssertionFailure("expected an integer", what);
+        self.assembler.emitEnd();
+    }
+
+    fn emitValueToSmi(self: *WasmMacroAssembler) void {
+        self.assembler.emitI32Const(Value.TagBits);
+        self.assembler.emitI32ShrS();
+    }
+
+    fn emitSmiToValue(self: *WasmMacroAssembler) void {
+        self.assembler.emitI32Const(Value.TagBits);
+        self.assembler.emitI32Shl();
+        self.assembler.emitI32Const(Value.SmiTag);
+        self.assembler.emitI32Or();
+    }
+
+    fn emitCheckHeapObject(self: *WasmMacroAssembler, local_idx: usize, kind: HeapObject.Kind, what: []const u8) void {
+        self.assembler.emitBlock(null);
+        self.assembler.emitLocalGet(local_idx);
+        self.assembler.emitI32Const(Value.TagMask);
+        self.assembler.emitI32And();
+        self.assembler.emitI32Eqz();
+        self.assembler.emitBrIf(0);
+        self.emitAssertionFailure("expected an heap object", what);
+        self.assembler.emitEnd();
+
+        self.assembler.emitBlock(null);
+        self.assembler.emitLocalGet(local_idx);
+        self.emitLoadPointer(null);
+        self.assembler.emitI32Const(HeapObject.NotForwardedBits);
+        self.assembler.emitI32ShrU();
+        self.assembler.emitI32Const(@intCast(i32, @enumToInt(kind)));
+        self.assembler.emitI32Eq();
+        self.assembler.emitBrIf(0);
+        self.emitAssertionFailure("expected a different heap object kind", what);
+        self.assembler.emitEnd();
+    }
+
+    fn emitValueToHeapObject(self: *WasmMacroAssembler) void {
         _ = self;
     }
 
-    fn endModule(self: WasmMacroAssembler) std.ArrayList(u8) {
+    fn emitHeapObjectToValue(self: *WasmMacroAssembler) void {
+        _ = self;
+    }
+
+    fn initializeVMCallTypes(self: *WasmMacroAssembler) void {
+        const arr = [_]WasmValType{ .I32, .I32, .I32 };
+        const Call_0_0 = self.module_builder.internFuncType(arr[0..0], arr[0..0]);
+        const Call_2_0 = self.module_builder.internFuncType(arr[0..2], arr[0..0]);
+        const Call_2_1 = self.module_builder.internFuncType(arr[0..2], arr[0..1]);
+        const Call_3_1 = self.module_builder.internFuncType(arr[0..], arr[0..1]);
+        self.vm_call_types = .{
+            .Allocate = Call_2_1,
+            .PushRoot = Call_2_1,
+            .GetRoot = Call_2_1,
+            .PopRoots = Call_2_0,
+            .Error = Call_2_0,
+            .Debug = Call_2_1,
+            .Eval = Call_3_1,
+            .JitCall = Call_2_1,
+            .StartFunction = Call_0_0,
+            .initialized = true,
+        };
+    }
+
+    fn beginFunction(self: *WasmMacroAssembler) void {
+        if (!self.vm_call_types.initialized)
+            self.initializeVMCallTypes();
+
+        self.current_active_locals = 0;
+        self.current_root_count = 0;
+        self.max_roots = 0;
+        self.locals.clearAndFree();
+        self.assembler.writer.code.clearAndFree();
+    }
+
+    fn endFunction(self: *WasmMacroAssembler) u32 {
+        self.assembler.emitReturn();
+        self.assembler.emitEnd();
+        return self.module_builder.addFunction(self.vm_call_types.JitCall, self.locals, self.assembler.writer.finish());
+    }
+
+    fn recordRelocation(self: *WasmMacroAssembler, address: *anyopaque, func_idx: u32) void {
+        self.module_builder.addIndirectFunction(func_idx);
+        self.relocs.append(address) catch memError();
+    }
+
+    fn emitRelocations(self: *WasmMacroAssembler) void {
+        const count = @intCast(i32, self.relocs.items.len);
+        self.beginFunction();
+        self.locals.append(.I32) catch memError();
+        const base = 0;
+        self.assembler.emitRefNull(.FuncRef);
+        self.assembler.emitI32Const(count);
+        self.assembler.emitTableGrow(0);
+        self.assembler.emitLocalSet(base);
+
+        self.assembler.emitLocalGet(base);
+        self.assembler.emitI32Const(0);
+        self.assembler.emitI32Const(count);
+        self.assembler.emitTableInit(0, 0);
+
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            self.assembler.emitI32Const(@intCast(i32, @ptrToInt(self.relocs.items[i])));
+            self.assembler.emitLocalGet(base);
+            self.assembler.emitI32Const(@intCast(i32, i));
+            self.assembler.emitI32Add();
+            self.assembler.emitI32Store(null);
+        }
+
+        self.assembler.emitEnd();
+        const offset = self.module_builder.addFunction(self.vm_call_types.StartFunction, self.locals, self.assembler.writer.finish());
+
+        self.module_builder.recordStartFunction(offset);
+        self.relocs.clearAndFree();
+    }
+
+    fn endModule(self: *WasmMacroAssembler) std.ArrayList(u8) {
         self.emitRelocations();
         return self.module_builder.finish();
     }
@@ -1515,16 +1830,187 @@ const WasmMacroAssembler = struct {
 const WasmCompiler = struct {
     masm: WasmMacroAssembler = WasmMacroAssembler{},
 
-    fn init() WasmCompiler {
-        return .{};
+    fn compile(self: *WasmCompiler, expr: *Expr, env_root: usize) void {
+        switch (expr.kind) {
+            .Func => {
+                const func = @fieldParentPtr(Func, "expr", expr);
+                self.masm.emitAllocate(Closure);
+                const local = self.masm.acquireLocal(null);
+                self.masm.assembler.emitLocalTee(local);
+                self.masm.emitHeapObjectInitTag(.Closure);
+                self.masm.assembler.emitLocalGet(local);
+                self.masm.emitLoadGCRoot(env_root);
+                self.masm.emitStorePointer(Closure.offsetOfEnv());
+                self.masm.assembler.emitLocalGet(local);
+                self.masm.emitPushConstantPointer(func);
+                self.masm.emitStorePointer(Closure.offsetOfFunc());
+                self.masm.assembler.emitLocalGet(local);
+                self.masm.releaseLocal();
+            },
+            .Var => {
+                const var_ = @fieldParentPtr(Var, "expr", expr);
+                self.masm.emitLoadGCRoot(env_root);
+                var depth = var_.depth;
+                while (depth > 0) {
+                    depth -= 1;
+                    self.masm.emitLoadPointer(Env.offsetOfPrev());
+                }
+                self.masm.emitLoadPointer(Env.offsetOfVal());
+            },
+            .Prim => {
+                const prim = @fieldParentPtr(Prim, "expr", expr);
+                self.compile(prim.lhs, env_root);
+                const lhs = self.masm.acquireLocal(null);
+                self.masm.assembler.emitLocalSet(lhs);
+                self.masm.emitCheckSmi(lhs, "primcall");
+                self.compile(prim.rhs, env_root);
+                const rhs = self.masm.acquireLocal(null);
+                self.masm.assembler.emitLocalSet(rhs);
+                self.masm.emitCheckSmi(rhs, "primcall");
+
+                self.masm.assembler.emitLocalGet(lhs);
+                self.masm.emitValueToSmi();
+                self.masm.assembler.emitLocalGet(rhs);
+                self.masm.emitValueToSmi();
+                switch (prim.op) {
+                    .Eq => self.masm.assembler.emitI32Eq(),
+                    .LessThan => self.masm.assembler.emitI32LtS(),
+                    .Add => self.masm.assembler.emitI32Add(),
+                    .Sub => self.masm.assembler.emitI32Sub(),
+                    .Mul => self.masm.assembler.emitI32Mul(),
+                }
+                self.masm.emitSmiToValue();
+                self.masm.releaseLocals(2);
+            },
+            .Literal => {
+                const literal = @fieldParentPtr(Literal, "expr", expr);
+                const v = Value.initVal(literal.val);
+                self.masm.assembler.emitI32Const(@intCast(i32, v.bits()));
+            },
+            .Call => {
+                const call = @fieldParentPtr(Call, "expr", expr);
+                self.compile(call.func, env_root);
+
+                const unrooted_callee = self.masm.acquireLocal(null);
+                const unrooted_env = self.masm.acquireLocal(null);
+
+                self.masm.assembler.emitLocalSet(unrooted_callee);
+                self.masm.emitCheckHeapObject(unrooted_callee, .Closure, "call");
+                self.masm.assembler.emitLocalGet(unrooted_callee);
+                const callee = self.masm.emitStoreGCRoot();
+                self.compile(call.arg, env_root);
+                const arg = self.masm.emitStoreGCRoot();
+                self.masm.emitAllocate(Env);
+                // unrooted_callee now invalid.
+
+                self.masm.assembler.emitLocalTee(unrooted_env);
+                self.masm.emitHeapObjectInitTag(.Env);
+                self.masm.assembler.emitLocalGet(unrooted_env);
+                self.masm.emitLoadGCRoot(callee);
+                self.masm.emitLoadPointer(Closure.offsetOfEnv());
+                self.masm.emitStorePointer(Env.offsetOfPrev());
+                self.masm.assembler.emitLocalGet(unrooted_env);
+                self.masm.emitLoadGCRoot(arg);
+                self.masm.emitStorePointer(Env.offsetOfVal());
+
+                self.masm.emitLoadGCRoot(callee);
+                self.masm.assembler.emitLocalSet(unrooted_callee);
+                self.masm.emitPopGCRootsAndReleaseLocals(2);
+                // Now unrooted_env and unrooted_callee valid, gcroots popped.
+
+                self.masm.assembler.emitBlock(.I32);
+                self.masm.assembler.emitBlock(null);
+                self.masm.assembler.emitLocalGet(unrooted_callee);
+                self.masm.emitLoadPointer(Closure.offsetOfFunc());
+                self.masm.emitLoadPointer(Func.offsetOfJitCode());
+                // If there is jit code, jump out.
+                self.masm.assembler.emitBrIf(0);
+
+                // No jit code?  Call eval.  FIXME: tail calls.
+                self.masm.assembler.emitLocalGet(unrooted_callee);
+                self.masm.emitLoadPointer(Closure.offsetOfFunc());
+                self.masm.emitLoadPointer(Func.offsetOfBody());
+                self.masm.assembler.emitLocalGet(unrooted_env);
+                self.masm.emitHeap();
+                self.masm.emitVMCall(*const @TypeOf(VMCall.Eval), VMCall.Eval, self.masm.vm_call_types.Eval);
+                self.masm.assembler.emitBr(1); // Called eval, jump past jit call with result.
+                self.masm.assembler.emitEnd();
+
+                // Otherwise if we get here there's JIT code.
+                self.masm.assembler.emitLocalGet(unrooted_env);
+                self.masm.emitHeap();
+                self.masm.assembler.emitLocalGet(unrooted_callee);
+                self.masm.emitLoadPointer(Closure.offsetOfFunc());
+                self.masm.emitLoadPointer(Func.offsetOfJitCode());
+                self.masm.assembler.emitCallIndirect(self.masm.vm_call_types.JitCall, null);
+                self.masm.assembler.emitEnd();
+
+                self.masm.releaseLocals(2);
+            },
+            .LetRec => {
+                const letrec = @fieldParentPtr(LetRec, "expr", expr);
+                self.masm.emitAllocate(Env);
+                {
+                    const unrooted_env = self.masm.acquireLocal(null);
+                    self.masm.assembler.emitLocalTee(unrooted_env);
+                    self.masm.emitHeapObjectInitTag(.Env);
+                    self.masm.assembler.emitLocalGet(unrooted_env);
+                    self.masm.emitLoadGCRoot(env_root);
+                    self.masm.emitStorePointer(Env.offsetOfPrev());
+                    self.masm.assembler.emitLocalGet(unrooted_env);
+                    self.masm.assembler.emitI32Const(@intCast(i32, Value.initVal(0).bits()));
+                    self.masm.emitStorePointer(Env.offsetOfVal());
+                    self.masm.assembler.emitLocalGet(unrooted_env);
+                    self.masm.releaseLocal();
+                }
+                const env = self.masm.emitStoreGCRoot();
+                self.compile(letrec.arg, env);
+                {
+                    const unrooted_arg = self.masm.acquireLocal(null);
+                    self.masm.assembler.emitLocalSet(unrooted_arg);
+                    self.masm.emitLoadGCRoot(env);
+                    self.masm.assembler.emitLocalGet(unrooted_arg);
+                    self.masm.emitStorePointer(Env.offsetOfVal());
+                    self.masm.releaseLocal();
+                }
+
+                self.compile(letrec.body, env);
+                self.masm.emitPopGCRootsAndReleaseLocals(1);
+            },
+            .If => {
+                const if_ = @fieldParentPtr(If, "expr", expr);
+                self.compile(if_.test_, env_root);
+                {
+                    const test_ = self.masm.acquireLocal(null);
+                    self.masm.assembler.emitLocalSet(test_);
+                    self.masm.emitCheckSmi(test_, "conditional");
+                    self.masm.assembler.emitBlock(.I32);
+                    self.masm.assembler.emitBlock(null);
+                    self.masm.assembler.emitLocalGet(test_);
+                    self.masm.emitValueToSmi();
+                    self.masm.releaseLocal();
+                }
+                self.masm.assembler.emitBrIf(0);
+                self.compile(if_.alternate, env_root);
+                self.masm.assembler.emitBr(1);
+                self.masm.assembler.emitEnd();
+                self.compile(if_.consequent, env_root);
+                self.masm.assembler.emitEnd();
+            },
+        }
     }
 
-    fn compileFunction(self: WasmCompiler, func: *Func) void {
-        _ = self;
-        _ = func;
+    fn compileFunction(self: *WasmCompiler, func: *Func) void {
+        self.masm.beginFunction();
+        self.masm.emitUnrootedEnv();
+        const env = self.masm.emitStoreGCRoot();
+        self.compile(func.body, env);
+        self.masm.emitPopGCRootsAndReleaseLocals(1);
+        const offset = self.masm.endFunction();
+        self.masm.recordRelocation(&func.jit_code, offset);
     }
 
-    fn finish(self: WasmCompiler) std.ArrayList(u8) {
+    fn finish(self: *WasmCompiler) std.ArrayList(u8) {
         return self.masm.endModule();
     }
 };
@@ -1537,7 +2023,7 @@ export fn jitModule() ?*WasmModule {
     if (jit_candidates.count() == 0)
         return null;
 
-    var comp = WasmCompiler.init();
+    var comp = WasmCompiler{};
     var it = jit_candidates.keyIterator();
     while (it.next()) |f| {
         comp.compileFunction(f.*);
@@ -1561,5 +2047,5 @@ export fn freeModule(mod: *WasmModule) void {
 }
 
 export fn allocateBytes(len: usize) *anyopaque {
-    return (gpa.allocator().alloc(u8, len) catch std.process.exit(1)).ptr;
+    return (gpa.allocator().alloc(u8, len) catch memError()).ptr;
 }
